@@ -103,6 +103,42 @@ It is a development tool only:
 
 To use a real provider, change `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URI` and `AUTH_ROLES_CLAIM` in `.env`. No code changes are needed.
 
+### Using Auth0 (email/password and Google)
+
+The app works with any OIDC provider. These are the steps for Auth0:
+
+1. **Create an API.** Go to Applications, then APIs, then Create API. Set the identifier to `https://api.ggi.local` and the signing algorithm to RS256.
+2. **Create an application.** Go to Applications, then Create Application, and choose **Native**. In its settings, add `http://localhost:4001/callback` to **Allowed Callback URLs**.
+3. **Enable the logins.** On the application's Connections tab, turn on **Username-Password-Authentication** (email/password) and **google-oauth2** (Google).
+4. **Add roles to the token.** Go to User Management, then Roles, and create an `admin` role. Then create a Post Login Action with this code, and add it to the Login flow:
+
+   ```js
+   exports.onExecutePostLogin = async (event, api) => {
+     api.accessToken.setCustomClaim('https://ggi.local/roles', event.authorization?.roles ?? []);
+   };
+   ```
+
+5. **Update `.env`:**
+
+   ```
+   AUTH_ISSUER=https://YOUR_TENANT.auth0.com/
+   AUTH_JWKS_URI=https://YOUR_TENANT.auth0.com/.well-known/jwks.json
+   AUTH_AUDIENCE=https://api.ggi.local
+   AUTH_ROLES_CLAIM=https://ggi.local/roles
+   OIDC_CLIENT_ID=your-application-client-id
+   ```
+
+Then sign in from the command line. A browser window opens with the Auth0 login page:
+
+```bash
+npm run api -- login            # email/password or Google
+npm run api -- login --google   # straight to Google
+npm run api -- ask "Hello"      # now uses your real account
+npm run api -- logout           # back to the local dev provider
+```
+
+The login uses the OAuth2 Authorization Code flow with PKCE (`scripts/oidcLogin.ts`).
+
 ### AI provider
 
 By default the app uses a **mocked OpenAI provider**, as the brief asks. It waits a random time and returns an answer in the OpenAI response format, with token counts.

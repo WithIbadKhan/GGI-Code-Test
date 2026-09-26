@@ -2,17 +2,17 @@
  * Development CLI that talks to the API the way a real client must:
  * access token from the identity provider, then a session, then signed requests.
  *
+ *   npm run api -- login                 sign in with the real provider (e.g. Auth0)
  *   npm run api -- ask "What is DDD?"
- *   npm run api -- usage --as bob
- *   npm run api -- metrics --admin
+ *   npm run api -- usage --as bob        (local dev provider only)
  *
- * Sessions are cached per user in .dev-idp/sessions.json (git-ignored).
- * Requires `npm run dev:idp` and `npm run dev` to be running.
+ * Tokens and sessions are cached in .dev-idp/ (git-ignored).
  */
 import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { signRequest } from '../src/shared/security/requestSigning.js';
+import { loginWithBrowser, type OidcToken } from './oidcLogin.js';
 
 if (process.env.NODE_ENV === 'production') {
   console.error('This development CLI refuses to run with NODE_ENV=production.');
@@ -20,8 +20,10 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const API = process.env.API_URL ?? `http://localhost:${process.env.PORT ?? '3000'}`;
-const IDP = 'http://localhost:4000';
-const CACHE_FILE = '.dev-idp/sessions.json';
+const DEV_IDP = 'http://localhost:4000';
+const CACHE_DIR = '.dev-idp';
+const SESSIONS_FILE = `${CACHE_DIR}/sessions.json`;
+const LOGIN_FILE = `${CACHE_DIR}/login.json`;
 
 interface CachedSession {
   accessToken: string;
@@ -30,10 +32,19 @@ interface CachedSession {
   expiresAt: string;
 }
 
+/** Who the CLI acts as: the account signed in with `login`, or a local dev user. */
+type Identity = { kind: 'login'; token: OidcToken } | { kind: 'dev'; sub: string; admin: boolean };
+
 const HELP = `
 Usage: npm run api -- <command> [args] [--as <name>] [--admin]
 
-Default user: alice. --as <name> acts as another user; --admin acts as an admin.
+Login
+  login                       sign in with the real provider in your browser
+  login --google              same, going straight to Google
+  logout                      forget the login and use the local dev provider again
+
+Without a login, the local dev provider is used (default user: alice).
+--as <name> acts as another dev user; --admin acts as a dev admin.
 
 Chat
   ask "<question>"            ask the AI (uses free quota first, then bundles)
@@ -46,7 +57,7 @@ Subscriptions (tiers: BASIC, PRO, ENTERPRISE; cycles: MONTHLY, YEARLY)
   renew <id> on|off           turn auto-renew on or off
   cancel <id>                 cancel a subscription
 
-Admin (use --admin)
+Admin
   metrics                     system-wide usage and subscription metrics
 
 Other
@@ -70,10 +81,20 @@ async function main(): Promise<void> {
 
   const admin = hasFlag('--admin');
   const noRenew = hasFlag('--no-renew');
+  const google = hasFlag('--google');
   const user = flag('--as') ?? (admin ? 'admin' : 'alice');
   const [command, ...rest] = args;
 
-  const client = new DevClient(`dev|${user}`, admin);
+  if (command === 'login') return login(google);
+  if (command === 'logout') {
+    logout();
+    return;
+  }
+
+  const loggedIn = readLogin();
+  const client = new ApiClient(
+    loggedIn ? { kind: 'login', token: loggedIn } : { kind: 'dev', sub: `dev|${user}`, admin },
+  );
 
   switch (command) {
     case 'ask':
@@ -111,29 +132,54 @@ async function main(): Promise<void> {
   }
 }
 
-class DevClient {
-  constructor(
-    private readonly sub: string,
-    private readonly admin: boolean,
-  ) {}
+async function login(google: boolean): Promise<void> {
+  const issuer = process.env.AUTH_ISSUER ?? '';
+  const clientId = process.env.OIDC_CLIENT_ID ?? '';
+  const audience = process.env.AUTH_AUDIENCE ?? '';
+  if (!issuer.startsWith('https://') || !clientId || !audience) {
+    throw new Error(
+      'Point AUTH_ISSUER, AUTH_JWKS_URI and AUTH_AUDIENCE at your provider and set OIDC_CLIENT_ID in .env first.',
+    );
+  }
+
+  const token = await loginWithBrowser({
+    issuer,
+    clientId,
+    audience,
+    ...(google ? { connection: 'google-oauth2' } : {}),
+  });
+  writeJson(LOGIN_FILE, token);
+  rmSync(SESSIONS_FILE, { force: true });
+  console.log('Logged in. Commands now use your real account.');
+}
+
+function logout(): void {
+  rmSync(LOGIN_FILE, { force: true });
+  rmSync(SESSIONS_FILE, { force: true });
+  console.log('Logged out. Commands use the local dev provider again.');
+}
+
+class ApiClient {
+  constructor(private readonly identity: Identity) {}
 
   async call(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<void> {
     let res = await this.send(method, path, body);
-    // The cached session may have been revoked or wiped: start a new one and retry once.
+    // The cached session may have expired or been wiped: start a new one and retry once.
     if (res.status === 401) {
-      this.forget();
+      this.forgetSession();
       res = await this.send(method, path, body);
     }
     await print(res);
   }
 
-  forget(): void {
-    const remaining = Object.entries(readCache()).filter(([key]) => key !== this.cacheKey);
-    writeCache(Object.fromEntries(remaining));
+  private get cacheKey(): string {
+    const id = this.identity;
+    return id.kind === 'login' ? 'login' : `${id.sub}${id.admin ? ' (admin)' : ''}`;
   }
 
-  private get cacheKey(): string {
-    return `${this.sub}${this.admin ? ' (admin)' : ''}`;
+  private forgetSession(): void {
+    const remaining = Object.entries(readSessions()).filter(([key]) => key !== this.cacheKey);
+    writeJson(SESSIONS_FILE, Object.fromEntries(remaining));
   }
 
   private async send(method: string, path: string, body?: unknown): Promise<Response> {
@@ -164,16 +210,11 @@ class DevClient {
   }
 
   private async session(): Promise<CachedSession> {
-    const cache = readCache();
-    const cached = cache[this.cacheKey];
+    const sessions = readSessions();
+    const cached = sessions[this.cacheKey];
     if (cached && Date.parse(cached.expiresAt) > Date.now() + 60_000) return cached;
 
-    const tokenUrl = `${IDP}/token?sub=${encodeURIComponent(this.sub)}${this.admin ? '&role=admin' : ''}`;
-    const tokenRes = await fetch(tokenUrl).catch(() => {
-      throw new Error(`Cannot reach the dev identity provider at ${IDP}. Run: npm run dev:idp`);
-    });
-    const { access_token: accessToken } = (await tokenRes.json()) as { access_token: string };
-
+    const accessToken = await this.accessToken();
     const sessionRes = await fetch(`${API}/api/v1/auth/session`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -187,9 +228,20 @@ class DevClient {
     const created = (await sessionRes.json()) as Omit<CachedSession, 'accessToken'>;
 
     const session = { accessToken, ...created };
-    cache[this.cacheKey] = session;
-    writeCache(cache);
+    sessions[this.cacheKey] = session;
+    writeJson(SESSIONS_FILE, sessions);
     return session;
+  }
+
+  private async accessToken(): Promise<string> {
+    const id = this.identity;
+    if (id.kind === 'login') return id.token.accessToken;
+
+    const url = `${DEV_IDP}/token?sub=${encodeURIComponent(id.sub)}${id.admin ? '&role=admin' : ''}`;
+    const res = await fetch(url).catch(() => {
+      throw new Error(`Cannot reach the dev identity provider at ${DEV_IDP}. Run: npm run dev:idp`);
+    });
+    return ((await res.json()) as { access_token: string }).access_token;
   }
 }
 
@@ -204,15 +256,22 @@ async function print(res: Response): Promise<void> {
   }
 }
 
-function readCache(): Record<string, CachedSession> {
-  return existsSync(CACHE_FILE)
-    ? (JSON.parse(readFileSync(CACHE_FILE, 'utf8')) as Record<string, CachedSession>)
+/** The saved login, if it has not expired. */
+function readLogin(): OidcToken | null {
+  if (!existsSync(LOGIN_FILE)) return null;
+  const token = JSON.parse(readFileSync(LOGIN_FILE, 'utf8')) as OidcToken;
+  return Date.parse(token.expiresAt) > Date.now() + 60_000 ? token : null;
+}
+
+function readSessions(): Record<string, CachedSession> {
+  return existsSync(SESSIONS_FILE)
+    ? (JSON.parse(readFileSync(SESSIONS_FILE, 'utf8')) as Record<string, CachedSession>)
     : {};
 }
 
-function writeCache(cache: Record<string, CachedSession>): void {
-  mkdirSync('.dev-idp', { recursive: true });
-  writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+function writeJson(file: string, value: unknown): void {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  writeFileSync(file, JSON.stringify(value, null, 2));
 }
 
 main().catch((error: unknown) => {
