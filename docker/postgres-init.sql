@@ -1,0 +1,1 @@
+CREATE DATABASE ggi_test OWNER ggi;

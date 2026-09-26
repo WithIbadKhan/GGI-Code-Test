@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+# Private signing key and cached sessions of the local dev tools.
+.dev-idp/
+# Local editor/assistant settings.
+.claude/
