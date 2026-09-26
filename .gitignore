@@ -1,11 +1,26 @@
+# Dependencies and build output
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+
+# Environment files: they hold secrets. Only the example is committed.
 .env
 .env.*
 !.env.example
+
+# Logs
 *.log
-# Private signing key and cached sessions of the local dev tools.
+npm-debug.log*
+
+# Private signing key and cached sessions of the local dev tools
 .dev-idp/
-# Local editor/assistant settings.
-.claude/
+
+# Editor settings
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
