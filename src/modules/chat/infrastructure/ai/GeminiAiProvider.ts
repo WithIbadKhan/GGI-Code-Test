@@ -22,7 +22,12 @@ export class GeminiAiProvider implements AiProvider {
   private readonly client: GoogleGenAI;
 
   constructor(private readonly options: GeminiAiProviderOptions) {
-    this.client = new GoogleGenAI({ apiKey: options.apiKey });
+    this.client = new GoogleGenAI({
+      apiKey: options.apiKey,
+      // Gemini sometimes answers 503 (overloaded) or 429 (busy). Retry those a
+      // couple of times with a short backoff; the overall timeout still applies.
+      httpOptions: { retryOptions: { attempts: 3, initialDelay: 1, maxDelay: 4 } },
+    });
   }
 
   async ask(question: string): Promise<AiCompletion> {
