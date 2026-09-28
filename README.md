@@ -219,21 +219,6 @@ Every error has the same shape:
   }
 }
 ```
-
-| Status | Meaning                                                 |
-| ------ | ------------------------------------------------------- |
-| 400    | Invalid input                                           |
-| 401    | Missing or invalid token or signature                   |
-| 402    | Quota used up, or payment declined                      |
-| 403    | Not allowed for your role                               |
-| 404    | Not found (also used for other users' data)             |
-| 409    | Not allowed in the current state, e.g. cancelling twice |
-| 413    | Request body too large                                  |
-| 415    | Body is not JSON                                        |
-| 429    | Rate limit reached                                      |
-| 503    | AI provider unavailable, or the request took too long   |
-| 504    | AI provider timed out                                   |
-
 ## Architecture
 
 ```
@@ -425,11 +410,4 @@ All settings come from environment variables. See `.env.example` for the full li
 | `*_RATE_LIMIT_PER_IP`, `*_RATE_LIMIT_PER_USER`  | Rate limits for each route group        |
 | `CORS_ORIGINS`                                  | Allowed browser origins                 |
 
-## Known limitations
 
-- **Rate limits are in memory.** That is fine for one server. With several servers, the counters should move to a shared store such as Redis.
-- **Stored text is HTML-escaped.** For example, `a < b` is stored as `a &lt; b`. That is safe, but a client showing it as plain text has to decode it.
-- **A crash can leave a message `RESERVED`.** If the server stops while waiting for the AI, that message keeps its quota. A cleanup job could refund old reservations.
-- **Purchases are not idempotent.** If a client retries a purchase after a network error, it could buy twice. An `Idempotency-Key` header would fix this.
-- **Each signed request writes one nonce to the database.** At high volume, nonces would move to Redis.
-- **Cancelling during a chat request can return 409.** If a user cancels a bundle while a chat request is charging it, that request fails with `409` and nothing is overcharged. The client can simply retry.
