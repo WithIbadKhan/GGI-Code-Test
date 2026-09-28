@@ -4,7 +4,6 @@ A backend for an AI chat product with monthly quotas and paid subscription bundl
 
 It is written in TypeScript with Express and PostgreSQL, and follows Domain-Driven Design. Security comes first: every endpoint needs a verified access token from an external identity provider, and every API request must also be signed.
 
-The original brief is in `GGI - BACKEND TEST POSTURE (1) (1) (1).pdf` in this repository.
 
 ## Contents
 
